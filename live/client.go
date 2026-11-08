@@ -36,11 +36,19 @@ type Config struct {
 	UA       string  // 可选：覆盖浏览器指纹 UA；留空用 fingerprint.FingerprintFor(RoomID)
 	Platform string  // 可选：覆盖 browser_platform；留空同上同源
 
-	IdleDeadline  time.Duration // 空闲读超时；留空 = 6×当前心跳
-	FailBackoff   time.Duration // 每轮失败退避；留空 = 20s
-	LiveFailLimit int           // 连续抠不到 roomId 多少轮后判下播；留空 = 3
-	HTTPTimeout   time.Duration // 抓页超时；留空 = 15s
-	Logger func(format string, args ...any) // 可选：注入日志，留空丢弃
+	IdleDeadline  time.Duration                    // 空闲读超时；留空 = 6×当前心跳
+	FailBackoff   time.Duration                    // 每轮失败退避；留空 = 20s
+	LiveFailLimit int                              // 连续抠不到 roomId 多少轮后判下播；留空 = 3
+	HTTPTimeout   time.Duration                    // 抓页超时；留空 = 15s
+	Logger        func(format string, args ...any) // 可选：注入日志，留空丢弃
+
+	// HTTPClient 可选：注入自定义抓页客户端（如需 Chrome TLS 指纹抗风控）。nil→内置带超时客户端。
+	HTTPClient *http.Client
+
+	// Resolver 可选：覆盖内置"抓页+签名"。消费方用自己的 getLiveAndWs（保留 cookie 回收/ttwid/meta/风控等
+	// 成熟逻辑），返回已签好的 WssUrl + 握手头 + 事件元数据；client 仍独占拨号/读循环/ack/心跳/重连/分发。
+	// nil→用内置 resolve+webmssdk 路径。
+	Resolver func(ctx context.Context) (ResolveResult, error)
 
 	// PreConnect 是"拨号前否决"钩子（可选，nil=一律 Proceed）：
 	// 抓页解析成功、真正拨号前调用，消费方据 Page 自行判 status/风控，返回：
@@ -55,9 +63,9 @@ type Config struct {
 type ConnectAction int
 
 const (
-	ConnectProceed ConnectAction = iota // 默认：继续拨号
-	ConnectNotLive                      // 未开播，本轮不连
-	ConnectRiskControlled               // 风控壳页，本轮不连
+	ConnectProceed        ConnectAction = iota // 默认：继续拨号
+	ConnectNotLive                             // 未开播，本轮不连
+	ConnectRiskControlled                      // 风控壳页，本轮不连
 )
 
 // decide 是 PreConnect 的纯函数封装（便于单测）：无钩子一律 Proceed。
@@ -66,6 +74,15 @@ func decide(res ResolvedEvent, pre func(ResolvedEvent) ConnectAction) ConnectAct
 		return ConnectProceed
 	}
 	return pre(res)
+}
+
+// ResolveResult 是一次"抓页+签名"的产物：拨号所需的 WssUrl + 握手头 + 事件元数据。
+// 内置路径与消费方 Resolver 都返回它，runOnce 只负责据它拨号+读循环。
+type ResolveResult struct {
+	WssUrl       string
+	UA           string // 握手 user-agent（与签名同源）
+	CookieHeader string // 握手 cookie；空则不带
+	Resolved     ResolvedEvent
 }
 
 // Client 是传输层：解析房间→签名→拨号→读帧→typed 事件回调→心跳/ack→重连。
@@ -142,7 +159,7 @@ func (c *Client) Start(ctx context.Context) error {
 		default:
 		}
 
-		realRoomID, pushID, uid, page, err := c.resolve(ctx)
+		rr, err := c.resolveOnce(ctx)
 		if err != nil {
 			if errors.Is(err, ErrNoRoomID) {
 				failStreak++
@@ -163,7 +180,7 @@ func (c *Client) Start(ctx context.Context) error {
 		}
 		failStreak = 0
 
-		res := ResolvedEvent{RealRoomID: realRoomID, UID: uid, PushID: pushID, Page: page}
+		res := rr.Resolved
 		if lc, ok := c.life(); ok {
 			lc.OnResolved(res)
 		}
@@ -178,7 +195,7 @@ func (c *Client) Start(ctx context.Context) error {
 			continue
 		}
 
-		if err = c.runOnce(ctx, realRoomID, pushID, uid); err != nil {
+		if err = c.runOnce(ctx, rr); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -200,10 +217,13 @@ func (c *Client) Stop() {
 	}
 }
 
-// resolve 抓房间页→抠真实 roomId + 访客 pushID/uid，并回传页面原文。无 Cookie 时先领一个游客 ttwid。
-func (c *Client) resolve(ctx context.Context) (realRoomID, pushID string, uid int64, page []byte, err error) {
+// builtinResolve 抓房间页→抠真实 roomId + 访客 pushID/uid，并回传页面原文。无 Cookie 时先领一个游客 ttwid。
+func (c *Client) builtinResolve(ctx context.Context) (realRoomID, pushID string, uid int64, page []byte, err error) {
 	ua, _ := c.identity()
-	client := &http.Client{Timeout: c.cfg.HTTPTimeout}
+	client := c.cfg.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: c.cfg.HTTPTimeout}
+	}
 
 	// 游客态兜底：无 Cookie 时访问首页领 ttwid。
 	if c.cfg.Cookie == "" {
@@ -253,22 +273,40 @@ func (c *Client) resolve(ctx context.Context) (realRoomID, pushID string, uid in
 	return realRoomID, pushID, uid, body, nil
 }
 
-// runOnce 签名→拨号→读循环；任一步失败返回错误交上层重连。
-func (c *Client) runOnce(ctx context.Context, realRoomID, pushID string, uid int64) error {
+// resolveOnce 产出一轮的拨号材料：优先用消费方 Resolver，否则内置"抓页+签名"。
+func (c *Client) resolveOnce(ctx context.Context) (ResolveResult, error) {
+	if c.cfg.Resolver != nil {
+		return c.cfg.Resolver(ctx)
+	}
+	realRoomID, pushID, uid, page, err := c.builtinResolve(ctx)
+	if err != nil {
+		return ResolveResult{}, err
+	}
 	ua, platform := c.identity()
 	ws, err := webmssdk.New(uid).SetUa(ua).SetBrowserPlatform(platform).Run(realRoomID, pushID)
 	if err != nil {
-		return fmt.Errorf("生成 WS URL/签名失败：%w", err)
+		return ResolveResult{}, fmt.Errorf("生成 WS URL/签名失败：%w", err)
 	}
+	return ResolveResult{
+		WssUrl:       ws.WssUrl,
+		UA:           ua,
+		CookieHeader: c.cfg.Cookie,
+		Resolved:     ResolvedEvent{RealRoomID: realRoomID, UID: uid, PushID: pushID, Page: page},
+	}, nil
+}
 
+// runOnce 据 ResolveResult 拨号→读循环；失败返回错误交上层重连。
+func (c *Client) runOnce(ctx context.Context, rr ResolveResult) error {
 	header := http.Header{}
-	header.Set("user-agent", ua)
+	if rr.UA != "" {
+		header.Set("user-agent", rr.UA)
+	}
 	header.Set("origin", "https://live.douyin.com")
-	if c.cfg.Cookie != "" {
-		header.Set("cookie", c.cfg.Cookie)
+	if rr.CookieHeader != "" {
+		header.Set("cookie", rr.CookieHeader)
 	}
 
-	conn, hsResp, err := websocket.DefaultDialer.Dial(ws.WssUrl, header)
+	conn, hsResp, err := websocket.DefaultDialer.Dial(rr.WssUrl, header)
 	if err != nil {
 		code := 0
 		if hsResp != nil {
