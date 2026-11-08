@@ -23,6 +23,18 @@ func (c *Client) dispatch(m *pb.Message) {
 			h.OnChat(ChatEvent{User: chat.GetUser(), Content: chat.GetContent(), Raw: &chat, Frame: payload})
 		}
 
+	case "WebcastEmojiChatMessage":
+		var ec pb.EmojiChatMessage
+		if proto.Unmarshal(payload, &ec) == nil {
+			h.OnEmojiChat(EmojiChatEvent{User: ec.GetUser(), EmojiID: ec.GetEmojiId(), Content: ec.GetDefaultContent(), Raw: &ec, Frame: payload})
+		}
+
+	case "WebcastFansclubMessage":
+		var fc pb.FansclubMessage
+		if proto.Unmarshal(payload, &fc) == nil {
+			h.OnFansclub(FansclubEvent{User: fc.GetUser(), Type: fc.GetType(), Content: fc.GetContent(), Raw: &fc, Frame: payload})
+		}
+
 	case "WebcastGiftMessage":
 		var gift pb.GiftMessage
 		if proto.Unmarshal(payload, &gift) != nil || gift.GetGift() == nil {

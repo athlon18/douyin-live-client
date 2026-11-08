@@ -105,3 +105,29 @@ func TestDispatchUnknownMethodIgnored(t *testing.T) {
 		t.Errorf("unknown method should not dispatch chat")
 	}
 }
+
+func TestDispatchEmojiChatAndFansclub(t *testing.T) {
+	rec := &recorderEmoji{}
+	c := mustClient(t, rec)
+	c.dispatch(wrap(t, "WebcastEmojiChatMessage", &pb.EmojiChatMessage{
+		User: &pb.User{Id: 3, NickName: "丙"}, EmojiId: 888, DefaultContent: "[玫瑰]",
+	}))
+	c.dispatch(wrap(t, "WebcastFansclubMessage", &pb.FansclubMessage{
+		User: &pb.User{Id: 4, NickName: "丁"}, Type: 1, Content: "加入了粉丝团",
+	}))
+	if len(rec.emoji) != 1 || rec.emoji[0].Content != "[玫瑰]" || rec.emoji[0].EmojiID != 888 {
+		t.Errorf("emoji mismatch: %+v", rec.emoji)
+	}
+	if len(rec.club) != 1 || rec.club[0].Type != 1 || rec.club[0].Content != "加入了粉丝团" {
+		t.Errorf("fansclub mismatch: %+v", rec.club)
+	}
+}
+
+type recorderEmoji struct {
+	BaseHandler
+	emoji []EmojiChatEvent
+	club  []FansclubEvent
+}
+
+func (r *recorderEmoji) OnEmojiChat(e EmojiChatEvent) { r.emoji = append(r.emoji, e) }
+func (r *recorderEmoji) OnFansclub(e FansclubEvent)   { r.club = append(r.club, e) }

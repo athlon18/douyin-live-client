@@ -17,6 +17,24 @@ type ChatEvent struct {
 	Frame   []byte // 原始 payload 字节，便于消费方直接复用已有 protobuf 分发
 }
 
+// EmojiChatEvent：表情包弹幕。Content 取可读的 defaultContent（如 "[玫瑰]"）。
+type EmojiChatEvent struct {
+	User    *pb.User
+	EmojiID uint64
+	Content string
+	Raw     *pb.EmojiChatMessage
+	Frame   []byte
+}
+
+// FansclubEvent：粉丝团事件（type=抖音事件码，如加入粉丝团）。
+type FansclubEvent struct {
+	User    *pb.User
+	Type    int64
+	Content string
+	Raw     *pb.FansclubMessage
+	Frame   []byte
+}
+
 type GiftEvent struct {
 	User      *pb.User
 	ToUser    *pb.User
@@ -68,6 +86,8 @@ type ControlEvent struct {
 // Handler 接收所有实时事件。建议嵌入 BaseHandler，只覆写关心的回调。
 type Handler interface {
 	OnChat(ChatEvent)
+	OnEmojiChat(EmojiChatEvent)
+	OnFansclub(FansclubEvent)
 	OnGift(GiftEvent)
 	OnMember(MemberEvent)
 	OnLike(LikeEvent)
@@ -80,6 +100,8 @@ type Handler interface {
 type BaseHandler struct{}
 
 func (BaseHandler) OnChat(ChatEvent)               {}
+func (BaseHandler) OnEmojiChat(EmojiChatEvent)     {}
+func (BaseHandler) OnFansclub(FansclubEvent)       {}
 func (BaseHandler) OnGift(GiftEvent)               {}
 func (BaseHandler) OnMember(MemberEvent)           {}
 func (BaseHandler) OnLike(LikeEvent)               {}
