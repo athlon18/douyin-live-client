@@ -93,6 +93,8 @@ type Client struct {
 	conn   atomic.Pointer[websocket.Conn]
 	cancel context.CancelFunc
 
+	resolvedRoomID atomic.Pointer[string] // 最近一次解析出的真实 roomId，SendComment 复用
+
 	wmu sync.Mutex // 保护 WS 并发写（心跳 vs ack）
 }
 
@@ -179,6 +181,9 @@ func (c *Client) Start(ctx context.Context) error {
 			continue
 		}
 		failStreak = 0
+
+		rid := rr.Resolved.RealRoomID
+		c.resolvedRoomID.Store(&rid)
 
 		res := rr.Resolved
 		if lc, ok := c.life(); ok {
