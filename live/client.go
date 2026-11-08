@@ -217,19 +217,34 @@ func (c *Client) Stop() {
 	}
 }
 
-// builtinResolve 抓房间页→抠真实 roomId + 访客 pushID/uid，并回传页面原文。无 Cookie 时先领一个游客 ttwid。
-func (c *Client) builtinResolve(ctx context.Context) (realRoomID, pushID string, uid int64, page []byte, err error) {
+// builtinResolve 抓房间页→抠真实 roomId + 访客 pushID/uid，并回传页面原文与握手 cookie。
+// 无 Cookie 时领游客 ttwid，并把它带进返回的 cookieHeader（早前只领不用→握手缺 ttwid→被拒签）。
+func (c *Client) builtinResolve(ctx context.Context) (realRoomID, pushID, cookie string, uid int64, page []byte, err error) {
 	ua, _ := c.identity()
 	client := c.cfg.HTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: c.cfg.HTTPTimeout}
 	}
+	cookie = c.cfg.Cookie
+	var ttwid string
+	pickTtwid := func(cs []*http.Cookie) {
+		if ttwid != "" {
+			return
+		}
+		for _, ck := range cs {
+			if ck.Name == "ttwid" && ck.Value != "" {
+				ttwid = ck.Value
+				return
+			}
+		}
+	}
 
 	// 游客态兜底：无 Cookie 时访问首页领 ttwid。
-	if c.cfg.Cookie == "" {
+	if cookie == "" {
 		if req, e := http.NewRequestWithContext(ctx, http.MethodGet, "https://live.douyin.com/", nil); e == nil {
 			req.Header.Set("user-agent", ua)
 			if resp, e := client.Do(req); e == nil {
+				pickTtwid(resp.Cookies())
 				io.Copy(io.Discard, resp.Body)
 				resp.Body.Close()
 			}
@@ -238,29 +253,30 @@ func (c *Client) builtinResolve(ctx context.Context) (realRoomID, pushID string,
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://live.douyin.com/"+c.cfg.RoomID, nil)
 	if err != nil {
-		return "", "", 0, nil, err
+		return "", "", "", 0, nil, err
 	}
 	req.Header.Set("user-agent", ua)
 	req.Header.Set("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
-	if c.cfg.Cookie != "" {
-		req.Header.Set("cookie", c.cfg.Cookie)
+	if cookie != "" {
+		req.Header.Set("cookie", cookie)
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", "", 0, nil, fmt.Errorf("请求直播间页面失败：%w", err)
+		return "", "", "", 0, nil, fmt.Errorf("请求直播间页面失败：%w", err)
 	}
 	defer resp.Body.Close()
+	pickTtwid(resp.Cookies())
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", "", 0, nil, fmt.Errorf("读取响应失败：%w", err)
+		return "", "", "", 0, nil, fmt.Errorf("读取响应失败：%w", err)
 	}
 	pageStr := string(body)
 
 	m := reRoomID.FindStringSubmatch(pageStr)
 	if len(m) < 2 {
 		if m = reRoomIDStr.FindStringSubmatch(pageStr); len(m) < 2 {
-			return "", "", 0, nil, ErrNoRoomID
+			return "", "", "", 0, nil, ErrNoRoomID
 		}
 	}
 	realRoomID = m[1]
@@ -270,7 +286,12 @@ func (c *Client) builtinResolve(ctx context.Context) (realRoomID, pushID string,
 	}
 	// uid 解析失败留 0：webmssdk.New(0) 会自生成 user_unique_id。
 	uid, _ = strconv.ParseInt(pushID, 10, 64)
-	return realRoomID, pushID, uid, body, nil
+
+	// 握手 cookie：有登录 Cookie 就用它；否则用刚领到的游客 ttwid。
+	if cookie == "" && ttwid != "" {
+		cookie = "ttwid=" + ttwid
+	}
+	return realRoomID, pushID, cookie, uid, body, nil
 }
 
 // resolveOnce 产出一轮的拨号材料：优先用消费方 Resolver，否则内置"抓页+签名"。
@@ -278,7 +299,7 @@ func (c *Client) resolveOnce(ctx context.Context) (ResolveResult, error) {
 	if c.cfg.Resolver != nil {
 		return c.cfg.Resolver(ctx)
 	}
-	realRoomID, pushID, uid, page, err := c.builtinResolve(ctx)
+	realRoomID, pushID, cookie, uid, page, err := c.builtinResolve(ctx)
 	if err != nil {
 		return ResolveResult{}, err
 	}
@@ -290,7 +311,7 @@ func (c *Client) resolveOnce(ctx context.Context) (ResolveResult, error) {
 	return ResolveResult{
 		WssUrl:       ws.WssUrl,
 		UA:           ua,
-		CookieHeader: c.cfg.Cookie,
+		CookieHeader: cookie,
 		Resolved:     ResolvedEvent{RealRoomID: realRoomID, UID: uid, PushID: pushID, Page: page},
 	}, nil
 }
