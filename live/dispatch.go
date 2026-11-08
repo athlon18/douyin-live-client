@@ -20,7 +20,7 @@ func (c *Client) dispatch(m *pb.Message) {
 	case "WebcastChatMessage":
 		var chat pb.ChatMessage
 		if proto.Unmarshal(payload, &chat) == nil {
-			h.OnChat(ChatEvent{User: chat.GetUser(), Content: chat.GetContent(), Raw: &chat})
+			h.OnChat(ChatEvent{User: chat.GetUser(), Content: chat.GetContent(), Raw: &chat, Frame: payload})
 		}
 
 	case "WebcastGiftMessage":
@@ -49,24 +49,25 @@ func (c *Client) dispatch(m *pb.Message) {
 			Count:     cnt,
 			GroupID:   gid,
 			Raw:       &gift,
+			Frame:     payload,
 		})
 
 	case "WebcastMemberMessage":
 		var mem pb.MemberMessage
 		if proto.Unmarshal(payload, &mem) == nil {
-			h.OnMember(MemberEvent{User: mem.GetUser(), Action: int64(mem.GetAction()), Raw: &mem})
+			h.OnMember(MemberEvent{User: mem.GetUser(), Action: int64(mem.GetAction()), Raw: &mem, Frame: payload})
 		}
 
 	case "WebcastLikeMessage":
 		var like pb.LikeMessage
 		if proto.Unmarshal(payload, &like) == nil {
-			h.OnLike(LikeEvent{User: like.GetUser(), Delta: int64(like.GetCount()), Raw: &like})
+			h.OnLike(LikeEvent{User: like.GetUser(), Delta: int64(like.GetCount()), Raw: &like, Frame: payload})
 		}
 
 	case "WebcastSocialMessage":
 		var soc pb.SocialMessage
 		if proto.Unmarshal(payload, &soc) == nil {
-			h.OnSocial(SocialEvent{User: soc.GetUser(), Action: int64(soc.GetAction()), Raw: &soc})
+			h.OnSocial(SocialEvent{User: soc.GetUser(), Action: int64(soc.GetAction()), Raw: &soc, Frame: payload})
 		}
 
 	case "WebcastRoomUserSeqMessage":
@@ -77,12 +78,13 @@ func (c *Client) dispatch(m *pb.Message) {
 				TotalUser:  uint64(seq.GetTotalUser()),
 				Popularity: uint64(seq.GetPopularity()),
 				Raw:        &seq,
+				Frame:      payload,
 			})
 		}
 
 	case "WebcastControlMessage":
 		if st, ok := controlStatus(payload); ok {
-			h.OnControl(ControlEvent{Status: st})
+			h.OnControl(ControlEvent{Status: st, Frame: payload})
 		}
 	}
 }

@@ -14,6 +14,7 @@ type ChatEvent struct {
 	User    *pb.User
 	Content string
 	Raw     *pb.ChatMessage
+	Frame   []byte // 原始 payload 字节，便于消费方直接复用已有 protobuf 分发
 }
 
 type GiftEvent struct {
@@ -26,24 +27,28 @@ type GiftEvent struct {
 	Count     uint64 // 本帧计数：group_count||combo_count||1
 	GroupID   uint64 // 连击组 ID（消费方据此自行去重）
 	Raw       *pb.GiftMessage
+	Frame     []byte
 }
 
 type MemberEvent struct {
 	User   *pb.User
 	Action int64 // 官方 action：进入/离开等，语义由消费方判
 	Raw    *pb.MemberMessage
+	Frame  []byte
 }
 
 type LikeEvent struct {
 	User  *pb.User
 	Delta int64 // 这一帧该用户连点的次数
 	Raw   *pb.LikeMessage
+	Frame []byte
 }
 
 type SocialEvent struct {
 	User   *pb.User
 	Action int64 // 1=关注 2=取关 3=分享（官方 live ChatRoom.js 口径）
 	Raw    *pb.SocialMessage
+	Frame  []byte
 }
 
 type RoomUserSeqEvent struct {
@@ -51,11 +56,13 @@ type RoomUserSeqEvent struct {
 	TotalUser  uint64 // 本场到访总数
 	Popularity uint64 // 抖音给观众端展示的"人气/热度"（放大值，非在线数）
 	Raw        *pb.RoomUserSeqMessage
+	Frame      []byte
 }
 
 // ControlEvent：主播下播等控制帧。pb 里未声明 ControlMessage，故 status 由 protowire 手工取 f2。
 type ControlEvent struct {
-	Status int32 // 3 = 下播
+	Status int32  // 3 = 下播
+	Frame  []byte // 原始 payload，供消费方自带 ControlMessage 解析
 }
 
 // Handler 接收所有实时事件。建议嵌入 BaseHandler，只覆写关心的回调。
