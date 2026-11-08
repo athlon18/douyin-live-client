@@ -8,6 +8,22 @@
 
 ```sh
 go get github.com/athlon18/douyin-live-client
+
+## 国内安装（proxy.golang.org 被墙时）
+
+Go 默认代理 `proxy.golang.org` 在中国大陆常连不通，会卡在
+`dial tcp ...:443: connectex: ... failed` 上（看着像编译坏了，其实是取模块失败）。
+配国内镜像即可，本仓与依赖 `douyin-protocol` 都已可经 goproxy.cn 拉取：
+
+```sh
+# 全局设一次
+ go env -w GOPROXY=https://goproxy.cn,direct
+ go get github.com/athlon18/douyin-live-client
+```
+
+或单次：`GOPROXY=https://goproxy.cn,direct go get github.com/athlon18/douyin-live-client`。
+依赖已自包含（`require douyin-protocol v0.2.1`，无本地 replace），第三方 `go get` 直接可构建。
+
 ```
 
 依赖 `github.com/athlon18/douyin-protocol`（签名/帧/protobuf）与 `gorilla/websocket`。
