@@ -118,12 +118,15 @@ func (c *Client) Start(ctx context.Context) error {
 		default:
 		}
 
-		realRoomID, pushID, uid, err := c.resolve(ctx)
+		realRoomID, pushID, uid, page, err := c.resolve(ctx)
 		if err != nil {
 			if errors.Is(err, ErrNoRoomID) {
 				failStreak++
 				c.logf("[%s] 解析失败(第 %d 次)：%v", c.cfg.RoomID, failStreak, err)
 				if failStreak >= c.cfg.LiveFailLimit {
+					if lc, ok := c.life(); ok {
+						lc.OnOffline(OfflineEvent{Reason: ErrOffline})
+					}
 					return ErrOffline
 				}
 			} else {
@@ -135,6 +138,10 @@ func (c *Client) Start(ctx context.Context) error {
 			continue
 		}
 		failStreak = 0
+
+		if lc, ok := c.life(); ok {
+			lc.OnResolved(ResolvedEvent{RealRoomID: realRoomID, UID: uid, PushID: pushID, Page: page})
+		}
 
 		if err = c.runOnce(ctx, realRoomID, pushID, uid); err != nil {
 			if ctx.Err() != nil {
@@ -158,8 +165,8 @@ func (c *Client) Stop() {
 	}
 }
 
-// resolve 抓房间页→抠真实 roomId + 访客 pushID/uid。无 Cookie 时先领一个游客 ttwid。
-func (c *Client) resolve(ctx context.Context) (realRoomID, pushID string, uid int64, err error) {
+// resolve 抓房间页→抠真实 roomId + 访客 pushID/uid，并回传页面原文。无 Cookie 时先领一个游客 ttwid。
+func (c *Client) resolve(ctx context.Context) (realRoomID, pushID string, uid int64, page []byte, err error) {
 	ua, _ := c.identity()
 	client := &http.Client{Timeout: c.cfg.HTTPTimeout}
 
@@ -176,7 +183,7 @@ func (c *Client) resolve(ctx context.Context) (realRoomID, pushID string, uid in
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://live.douyin.com/"+c.cfg.RoomID, nil)
 	if err != nil {
-		return "", "", 0, err
+		return "", "", 0, nil, err
 	}
 	req.Header.Set("user-agent", ua)
 	req.Header.Set("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
@@ -186,29 +193,29 @@ func (c *Client) resolve(ctx context.Context) (realRoomID, pushID string, uid in
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", "", 0, fmt.Errorf("请求直播间页面失败：%w", err)
+		return "", "", 0, nil, fmt.Errorf("请求直播间页面失败：%w", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", "", 0, fmt.Errorf("读取响应失败：%w", err)
+		return "", "", 0, nil, fmt.Errorf("读取响应失败：%w", err)
 	}
-	page := string(body)
+	pageStr := string(body)
 
-	m := reRoomID.FindStringSubmatch(page)
+	m := reRoomID.FindStringSubmatch(pageStr)
 	if len(m) < 2 {
-		if m = reRoomIDStr.FindStringSubmatch(page); len(m) < 2 {
-			return "", "", 0, ErrNoRoomID
+		if m = reRoomIDStr.FindStringSubmatch(pageStr); len(m) < 2 {
+			return "", "", 0, nil, ErrNoRoomID
 		}
 	}
 	realRoomID = m[1]
 
-	if pm := rePushUID.FindStringSubmatch(page); len(pm) >= 2 {
+	if pm := rePushUID.FindStringSubmatch(pageStr); len(pm) >= 2 {
 		pushID = pm[1]
 	}
 	// uid 解析失败留 0：webmssdk.New(0) 会自生成 user_unique_id。
 	uid, _ = strconv.ParseInt(pushID, 10, 64)
-	return realRoomID, pushID, uid, nil
+	return realRoomID, pushID, uid, body, nil
 }
 
 // runOnce 签名→拨号→读循环；任一步失败返回错误交上层重连。
@@ -241,13 +248,30 @@ func (c *Client) runOnce(ctx context.Context, realRoomID, pushID string, uid int
 	}()
 
 	// 服务端在握手头声明心跳节奏（ping-interval=15）。
+	ping := time.Duration(0)
 	if hsResp != nil {
 		if d, ok := wsframe.ParsePingInterval(hsResp.Header.Get("Handshake-Options")); ok {
 			c.hbNano.Store(int64(d))
+			ping = d
 		}
 	}
+	if lc, ok := c.life(); ok {
+		lc.OnConnected(ConnectedEvent{PingInterval: ping})
+	}
 
-	return c.readLoop(ctx, conn)
+	rerr := c.readLoop(ctx, conn)
+	if rerr != nil && ctx.Err() == nil {
+		if lc, ok := c.life(); ok {
+			lc.OnDisconnected(DisconnectedEvent{Err: rerr})
+		}
+	}
+	return rerr
+}
+
+// life 探测消费方是否实现了生命周期钩子；未实现则 ok=false，钩子全程跳过。
+func (c *Client) life() (LifecycleHandler, bool) {
+	lc, ok := c.cfg.Handler.(LifecycleHandler)
+	return lc, ok
 }
 
 // readLoop 读帧主循环：解 PushFrame→(心跳/ack)→解 Response→逐条 dispatch。

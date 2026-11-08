@@ -1,6 +1,8 @@
 package live
 
 import (
+	"time"
+
 	pb "github.com/athlon18/douyin-protocol/webcast"
 )
 
@@ -77,3 +79,47 @@ func (BaseHandler) OnLike(LikeEvent)               {}
 func (BaseHandler) OnSocial(SocialEvent)           {}
 func (BaseHandler) OnRoomUserSeq(RoomUserSeqEvent) {}
 func (BaseHandler) OnControl(ControlEvent)         {}
+
+// —— 生命周期钩子（可选）——
+// 独立于事件 Handler：Client 通过类型断言探测，未实现者零影响。语义锚在 SDK 自身
+// 能判定的连接节点；房间状态/标题/主播等元数据不在 SDK 解析，Page 原样交给消费方
+// （如 douyinlive 的 parseLiveMeta）自interpret——SDK 保持纯传输。
+
+// ResolvedEvent：每次抓房间页解析成功后、拨号前触发。
+type ResolvedEvent struct {
+	RealRoomID string // 页面抠出的真实 roomId（长号）
+	UID        int64  // 访客 user_unique_id（0=SDK 自生成）
+	PushID     string // 页面 odin.user_id 原始串
+	Page       []byte // 房间页 HTML 原文，供消费方解析 status/标题/主播/流地址
+}
+
+// ConnectedEvent：WS 拨号成功、拿到服务端声明心跳后触发。
+type ConnectedEvent struct {
+	PingInterval time.Duration // 握手头声明的心跳周期；0=未声明(用默认)
+}
+
+// DisconnectedEvent：读循环因连接错误退出、即将退避重连时触发（干净的 Stop 不触发）。
+type DisconnectedEvent struct {
+	Err error
+}
+
+// OfflineEvent：SDK 判定放弃（连续多轮连 roomId 都抠不到）时触发，紧接 Start 返回 ErrOffline。
+type OfflineEvent struct {
+	Reason error
+}
+
+// LifecycleHandler 是生命周期回调；建议嵌入 LifecycleBase 只覆写关心的。
+type LifecycleHandler interface {
+	OnResolved(ResolvedEvent)
+	OnConnected(ConnectedEvent)
+	OnDisconnected(DisconnectedEvent)
+	OnOffline(OfflineEvent)
+}
+
+// LifecycleBase 是生命周期钩子的空实现，供嵌入。
+type LifecycleBase struct{}
+
+func (LifecycleBase) OnResolved(ResolvedEvent)         {}
+func (LifecycleBase) OnConnected(ConnectedEvent)       {}
+func (LifecycleBase) OnDisconnected(DisconnectedEvent) {}
+func (LifecycleBase) OnOffline(OfflineEvent)           {}

@@ -51,6 +51,19 @@ if err := c.Start(ctx); err != nil { /* 判下播/被取消 */ }
 
 每个事件都带 `Raw`（原始 protobuf），可读本库未铺平的任意字段。
 
+## 生命周期钩子（可选）
+
+消费方若同时嵌入 `live.LifecycleBase`，会额外收到连接节点回调（未实现者零影响，靠类型断言探测）：
+
+| 钩子 | 时机 | 载荷 |
+|---|---|---|
+| OnResolved | 抓页解析成功、拨号前 | 真实 roomId / uid / **Page 原文**（status/标题/主播/流地址由消费方自解析） |
+| OnConnected | WS 拨号成功、拿到声明心跳后 | PingInterval |
+| OnDisconnected | 读循环因连接错误退出、即将重连 | Err（干净的 Stop 不触发） |
+| OnOffline | 连续多轮抠不到 roomId、判定放弃（紧接 Start 返回 ErrOffline） | Reason |
+
+房间状态/元数据**不在 SDK 解释**——`OnResolved` 把页面原文交给消费方，保持 SDK 纯传输。
+
 ## 故意没做的
 
 - **连击去抖/合并**：公共库不该焊死口径，留给消费方按 `GroupID` 自行聚合。
