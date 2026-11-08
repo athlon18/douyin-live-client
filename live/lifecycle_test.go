@@ -43,3 +43,23 @@ func TestNewRejectsMissingHandler(t *testing.T) {
 		t.Error("RoomID 为空应报错")
 	}
 }
+
+func TestDecideGate(t *testing.T) {
+	res := ResolvedEvent{RealRoomID: "123"}
+	if got := decide(res, nil); got != ConnectProceed {
+		t.Errorf("无 PreConnect 应 Proceed，实际 %d", got)
+	}
+	if got := decide(res, func(ResolvedEvent) ConnectAction { return ConnectNotLive }); got != ConnectNotLive {
+		t.Errorf("PreConnect 返 NotLive 应透传，实际 %d", got)
+	}
+	// 钩子应收到解析结果（Page/RealRoomID 可用于消费方判 status/风控）。
+	got := decide(ResolvedEvent{RealRoomID: "r", Page: []byte("html")}, func(e ResolvedEvent) ConnectAction {
+		if e.RealRoomID == "r" && string(e.Page) == "html" {
+			return ConnectRiskControlled
+		}
+		return ConnectProceed
+	})
+	if got != ConnectRiskControlled {
+		t.Errorf("PreConnect 未拿到完整 ResolvedEvent，实际 %d", got)
+	}
+}

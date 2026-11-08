@@ -40,8 +40,32 @@ type Config struct {
 	FailBackoff   time.Duration // 每轮失败退避；留空 = 20s
 	LiveFailLimit int           // 连续抠不到 roomId 多少轮后判下播；留空 = 3
 	HTTPTimeout   time.Duration // 抓页超时；留空 = 15s
-
 	Logger func(format string, args ...any) // 可选：注入日志，留空丢弃
+
+	// PreConnect 是"拨号前否决"钩子（可选，nil=一律 Proceed）：
+	// 抓页解析成功、真正拨号前调用，消费方据 Page 自行判 status/风控，返回：
+	//   ConnectProceed        正常拨号
+	//   ConnectNotLive        判未开播 → 不拨号，退避后重试（消费方在自己的判定里结算/拆场）
+	//   ConnectRiskControlled 命中风控壳页 → 不拨号，退避后重试（消费方自行告警）
+	// 让 douyinlive 这类消费方保住"未开播不连 / 风控长退避"语义，client 仍保持纯传输、不解析 SSR。
+	PreConnect func(ResolvedEvent) ConnectAction
+}
+
+// ConnectAction 是 PreConnect 的决策结果。
+type ConnectAction int
+
+const (
+	ConnectProceed ConnectAction = iota // 默认：继续拨号
+	ConnectNotLive                      // 未开播，本轮不连
+	ConnectRiskControlled               // 风控壳页，本轮不连
+)
+
+// decide 是 PreConnect 的纯函数封装（便于单测）：无钩子一律 Proceed。
+func decide(res ResolvedEvent, pre func(ResolvedEvent) ConnectAction) ConnectAction {
+	if pre == nil {
+		return ConnectProceed
+	}
+	return pre(res)
 }
 
 // Client 是传输层：解析房间→签名→拨号→读帧→typed 事件回调→心跳/ack→重连。
@@ -139,8 +163,19 @@ func (c *Client) Start(ctx context.Context) error {
 		}
 		failStreak = 0
 
+		res := ResolvedEvent{RealRoomID: realRoomID, UID: uid, PushID: pushID, Page: page}
 		if lc, ok := c.life(); ok {
-			lc.OnResolved(ResolvedEvent{RealRoomID: realRoomID, UID: uid, PushID: pushID, Page: page})
+			lc.OnResolved(res)
+		}
+
+		// 拨号前否决：未开播 / 风控壳页 → 本轮不连，退避后重来（决策语义归消费方）。
+		switch act := decide(res, c.cfg.PreConnect); act {
+		case ConnectNotLive, ConnectRiskControlled:
+			c.logf("[%s] PreConnect 否决拨号(action=%d)，退避重试", c.cfg.RoomID, int(act))
+			if !sleepCtx(ctx, c.cfg.FailBackoff) {
+				return ctx.Err()
+			}
+			continue
 		}
 
 		if err = c.runOnce(ctx, realRoomID, pushID, uid); err != nil {
